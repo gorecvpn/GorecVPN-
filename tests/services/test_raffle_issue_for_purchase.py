@@ -33,7 +33,11 @@ def _patch_settings(monkeypatch, *, enabled: bool):
     monkeypatch.setattr(
         raffle_service,
         'settings',
-        SimpleNamespace(is_raffle_enabled=lambda: enabled),
+        SimpleNamespace(
+            is_raffle_enabled=lambda: enabled,
+            get_raffle_max_tickets_per_user=lambda: 0,
+            get_raffle_max_tickets_per_payment=lambda: 0,
+        ),
     )
 
 
@@ -133,6 +137,11 @@ async def test_issue_for_purchase_creates_once(raffle_enabled, active_campaign, 
     )
     monkeypatch.setattr(
         raffle_service.raffle_crud,
+        'count_tickets_for_user',
+        AsyncMock(return_value=0),
+    )
+    monkeypatch.setattr(
+        raffle_service.raffle_crud,
         'create_ticket',
         AsyncMock(return_value=created),
     )
@@ -157,6 +166,11 @@ async def test_issue_skips_trial_when_flag_set(raffle_enabled, active_campaign, 
         raffle_service.raffle_crud,
         'list_tickets_by_campaign_tx',
         AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        raffle_service.raffle_crud,
+        'count_tickets_for_user',
+        AsyncMock(return_value=0),
     )
     create_ticket = AsyncMock()
     monkeypatch.setattr(raffle_service.raffle_crud, 'create_ticket', create_ticket)
@@ -197,6 +211,11 @@ async def test_issue_uses_tickets_by_tariff(raffle_enabled, active_campaign, mon
         'list_tickets_by_campaign_tx',
         AsyncMock(return_value=[]),
     )
+    monkeypatch.setattr(
+        raffle_service.raffle_crud,
+        'count_tickets_for_user',
+        AsyncMock(return_value=0),
+    )
     monkeypatch.setattr(raffle_service.raffle_crud, 'create_ticket', AsyncMock(side_effect=_create))
     monkeypatch.setattr(raffle_service, '_notify_user_ticket', AsyncMock(return_value=None))
 
@@ -225,6 +244,11 @@ async def test_issue_allows_paid_negative_amount_subscription(raffle_enabled, ac
         raffle_service.raffle_crud,
         'list_tickets_by_campaign_tx',
         AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        raffle_service.raffle_crud,
+        'count_tickets_for_user',
+        AsyncMock(return_value=0),
     )
     create_ticket = AsyncMock(return_value=created)
     monkeypatch.setattr(raffle_service.raffle_crud, 'create_ticket', create_ticket)
@@ -255,6 +279,11 @@ async def test_issue_skips_zero_amount_as_trial(raffle_enabled, active_campaign,
         raffle_service.raffle_crud,
         'list_tickets_by_campaign_tx',
         AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        raffle_service.raffle_crud,
+        'count_tickets_for_user',
+        AsyncMock(return_value=0),
     )
     create_ticket = AsyncMock()
     monkeypatch.setattr(raffle_service.raffle_crud, 'create_ticket', create_ticket)

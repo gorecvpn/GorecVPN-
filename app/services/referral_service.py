@@ -1007,6 +1007,19 @@ async def process_referral_topup(db: AsyncSession, user_id: int, topup_amount_ko
             )
             return False
 
+        # Raffle tickets for referrer on successful balance top-up (not on register).
+        try:
+            from app.services.raffle.service import issue_for_referral_topup
+
+            await issue_for_referral_topup(db, referrer.id, user.id, topup_amount_kopeks)
+        except Exception as raffle_exc:
+            logger.debug(
+                'Не удалось выдать билеты розыгрыша за реферальное пополнение',
+                referrer_id=referrer.id,
+                referee_id=user.id,
+                error=raffle_exc,
+            )
+
         if settings.is_referral_levels_scheme():
             return await _process_topup_levels(db, user, topup_amount_kopeks, bot)
 

@@ -7,6 +7,7 @@ page remains available via the miniapp itself — the bot menu must not launch i
 from __future__ import annotations
 
 import html
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -85,6 +86,37 @@ def _format_how_to_earn(campaign: RaffleCampaign, texts) -> str:
     return '\n'.join(lines)
 
 
+def _format_progress_block(campaign: RaffleCampaign, tickets: list, texts) -> str:
+    """Tickets count + days left (no pool size)."""
+    count = len(tickets)
+    lines = [
+        texts.t('RAFFLE_PROGRESS_HEADER', '📊 <b>Ваш прогресс</b>'),
+        texts.t('RAFFLE_PROGRESS_TICKETS', 'Билетов у вас: <b>{count}</b>').format(count=count),
+    ]
+    ends_at = getattr(campaign, 'ends_at', None)
+    if ends_at is not None:
+        now = datetime.now(UTC)
+        ends = ends_at if ends_at.tzinfo else ends_at.replace(tzinfo=UTC)
+        delta = ends - now
+        if delta.total_seconds() <= 0:
+            lines.append(texts.t('RAFFLE_PROGRESS_ENDED', 'Кампания завершается — ожидайте итоги.'))
+        else:
+            days = max(0, delta.days)
+            hours = max(0, delta.seconds // 3600)
+            if days > 0:
+                lines.append(texts.t('RAFFLE_PROGRESS_DAYS_LEFT', 'До окончания: <b>{days}</b> дн.').format(days=days))
+            else:
+                lines.append(
+                    texts.t('RAFFLE_PROGRESS_HOURS_LEFT', 'До окончания: <b>{hours}</b> ч.').format(hours=hours)
+                )
+            lines.append(
+                texts.t('RAFFLE_PROGRESS_ENDS_AT', 'Дата окончания: {dt}').format(
+                    dt=html.escape(ends.strftime('%d.%m.%Y %H:%M UTC'))
+                )
+            )
+    return '\n'.join(lines)
+
+
 def _format_tickets_block(tickets: list, texts) -> str:
     count = len(tickets)
     header = texts.t('RAFFLE_YOUR_TICKETS', 'Ваши билеты: <b>{count}</b>').format(count=count)
@@ -118,6 +150,7 @@ async def _build_raffle_screen(db: AsyncSession, db_user: User) -> tuple[str, In
     if campaign.description:
         parts.append(html.escape(campaign.description))
     parts.append(_format_prizes_block(campaign, texts))
+    parts.append(_format_progress_block(campaign, tickets, texts))
     parts.append(_format_how_to_earn(campaign, texts))
     parts.append(_format_tickets_block(tickets, texts))
 

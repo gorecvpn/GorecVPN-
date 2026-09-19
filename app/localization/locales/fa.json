@@ -2302,6 +2302,12 @@
   "RAFFLE_HOW_PURCHASE": "با خرید اشتراک — <b>{n}</b> بلیت.",
   "RAFFLE_HOW_TARIFF_NOTE": "برای برخی تعرفه‌ها تعداد بلیت ممکن است متفاوت باشد.",
   "RAFFLE_HOW_SKIP_TRIAL": "خریدهای آزمایشی / رایگان بلیت نمی‌دهند.",
+  "RAFFLE_PROGRESS_HEADER": "📊 <b>پیشرفت شما</b>",
+  "RAFFLE_PROGRESS_TICKETS": "بلیط‌های شما: <b>{count}</b>",
+  "RAFFLE_PROGRESS_ENDED": "کمپین در حال پایان است — منتظر نتایج باشید.",
+  "RAFFLE_PROGRESS_DAYS_LEFT": "مانده تا پایان: <b>{days}</b> روز.",
+  "RAFFLE_PROGRESS_HOURS_LEFT": "مانده تا پایان: <b>{hours}</b> ساعت.",
+  "RAFFLE_PROGRESS_ENDS_AT": "تاریخ پایان: {dt}",
   "RAFFLE_YOUR_TICKETS": "بلیت‌های شما: <b>{count}</b>",
   "RAFFLE_NO_TICKETS": "هنوز ندارید — اشتراک بخرید یا تمدید کنید.",
   "RAFFLE_TICKETS_TRUNCATED": "…و {n} مورد دیگر"

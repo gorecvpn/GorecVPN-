@@ -90,6 +90,7 @@ class NotificationType(Enum):
     PROMO_OFFER = 'promo_offer'
     RAFFLE_TICKET = 'raffle_ticket'
     RAFFLE_WINNER = 'raffle_winner'
+    RAFFLE_REMINDER = 'raffle_reminder'
 
     # Guest purchase notifications
     GUEST_SUBSCRIPTION_DELIVERED = 'guest_subscription_delivered'

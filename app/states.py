@@ -151,6 +151,8 @@ class AdminStates(StatesGroup):
     creating_raffle_campaign_name = State()
     creating_raffle_campaign_winners = State()
     creating_raffle_campaign_prize_value = State()
+    raffle_grant_telegram_id = State()
+    raffle_grant_count = State()
 
     editing_squad_price = State()
     editing_traffic_price = State()

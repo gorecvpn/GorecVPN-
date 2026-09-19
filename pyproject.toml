@@ -1,6 +1,6 @@
 [project]
 name = 'gorecbot'
-version = "4.16.9"
+version = "4.16.10"
 description = 'Telegram bot for RemnaWave VPN service'
 readme = 'README.md'
 license = { text = 'MIT' }

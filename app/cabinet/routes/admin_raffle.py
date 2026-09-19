@@ -1,18 +1,22 @@
 """Admin raffle campaign management for cabinet."""
 
 import asyncio
+import csv
+import io
 from datetime import datetime
 from typing import Any, Literal
 
 import structlog
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import StreamingResponse
 from PIL import Image as PILImage
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database.crud import raffle as raffle_crud
-from app.database.models import RaffleCampaignStatus, RafflePrizeType, RaffleWinner, User
+from app.database.crud.user import get_user_by_id, get_user_by_telegram_id
+from app.database.models import RaffleCampaignStatus, RafflePrizeType, RaffleTicketSource, RaffleWinner, User
 from app.services.news_media_service import (
     SavedMedia,
     detect_file_type,
@@ -25,6 +29,7 @@ from app.services.raffle.service import (
     _normalize_prize_slots,
     _normalize_tickets_by_tariff,
     draw_winners,
+    grant_tickets,
     max_winners_for_campaign,
     retry_award_winner,
     tickets_by_tariff_for_api,
@@ -720,3 +725,192 @@ async def delete_raffle_campaign(
         force=force,
         admin_id=admin.id,
     )
+
+
+class GrantRaffleTicketsRequest(BaseModel):
+    user_id: int | None = Field(None, ge=1)
+    telegram_id: int | None = Field(None, ge=1)
+    count: int = Field(..., ge=1, le=50)
+    note: str | None = Field(None, max_length=100)
+
+
+class GrantRaffleTicketsResponse(BaseModel):
+    campaign_id: int
+    user_id: int
+    tickets_issued: int
+    ticket_codes: list[str]
+
+
+@router.post(
+    '/campaigns/{campaign_id}/grant-tickets',
+    response_model=GrantRaffleTicketsResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def grant_raffle_tickets(
+    campaign_id: int,
+    request: GrantRaffleTicketsRequest,
+    admin: User = Depends(require_permission('raffle:edit')),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    """Grant N tickets to a user on an active campaign (admin promo)."""
+    if not settings.is_raffle_enabled():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Raffle disabled')
+    if not request.user_id and not request.telegram_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='user_id or telegram_id required')
+
+    campaign = await raffle_crud.get_campaign_by_id(db, campaign_id)
+    if not campaign:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Campaign not found')
+    if campaign.status != RaffleCampaignStatus.ACTIVE.value:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail='Campaign is not active')
+
+    user = None
+    if request.user_id:
+        user = await get_user_by_id(db, request.user_id)
+    elif request.telegram_id:
+        user = await get_user_by_telegram_id(db, request.telegram_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='User not found')
+
+    note = (request.note or '').strip() or f'admin:{admin.id}'
+    source_ref = f'admin:{admin.id}:{note}'[:128]
+    try:
+        tickets = await grant_tickets(
+            db,
+            user.id,
+            request.count,
+            source=RaffleTicketSource.ADMIN,
+            source_ref=source_ref,
+            campaign_id=campaign_id,
+            notify=True,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    logger.info(
+        'Admin granted raffle tickets',
+        campaign_id=campaign_id,
+        user_id=user.id,
+        count=len(tickets),
+        admin_id=admin.id,
+    )
+    return GrantRaffleTicketsResponse(
+        campaign_id=campaign_id,
+        user_id=user.id,
+        tickets_issued=len(tickets),
+        ticket_codes=[t.ticket_code for t in tickets],
+    )
+
+
+def _csv_stream(rows: list[list[Any]], filename: str) -> StreamingResponse:
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    for row in rows:
+        writer.writerow(row)
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type='text/csv; charset=utf-8',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get('/campaigns/{campaign_id}/export/tickets.csv')
+async def export_raffle_tickets_csv(
+    campaign_id: int,
+    admin: User = Depends(require_permission('raffle:view')),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    campaign = await raffle_crud.get_campaign_by_id(db, campaign_id)
+    if not campaign:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Campaign not found')
+    tickets = await raffle_crud.list_tickets_for_campaign(db, campaign_id)
+    rows: list[list[Any]] = [
+        [
+            'ticket_id',
+            'ticket_code',
+            'user_id',
+            'telegram_id',
+            'username',
+            'source',
+            'source_ref',
+            'source_transaction_id',
+            'tariff_id',
+            'ticket_index',
+            'created_at',
+        ]
+    ]
+    for t in tickets:
+        user = await get_user_by_id(db, t.user_id)
+        rows.append(
+            [
+                t.id,
+                t.ticket_code,
+                t.user_id,
+                getattr(user, 'telegram_id', None) if user else None,
+                getattr(user, 'username', None) if user else None,
+                getattr(t, 'source', None) or RaffleTicketSource.PURCHASE,
+                getattr(t, 'source_ref', None),
+                t.source_transaction_id,
+                t.tariff_id,
+                t.ticket_index,
+                t.created_at.isoformat() if t.created_at else '',
+            ]
+        )
+    return _csv_stream(rows, f'raffle_{campaign_id}_tickets.csv')
+
+
+@router.get('/campaigns/{campaign_id}/export/winners.csv')
+async def export_raffle_winners_csv(
+    campaign_id: int,
+    admin: User = Depends(require_permission('raffle:view')),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    campaign = await raffle_crud.get_campaign_by_id(db, campaign_id)
+    if not campaign:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='Campaign not found')
+    if campaign.status != RaffleCampaignStatus.DRAWN.value:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='CSV winners available after draw',
+        )
+    winners = await raffle_crud.list_winners(db, campaign_id)
+    rows: list[list[Any]] = [
+        [
+            'place',
+            'winner_id',
+            'user_id',
+            'telegram_id',
+            'username',
+            'ticket_code',
+            'prize_type',
+            'prize_value',
+            'prize_text',
+            'awarded',
+            'awarded_at',
+            'draw_seed',
+            'draw_algorithm',
+            'drawn_at',
+        ]
+    ]
+    for w in winners:
+        user = w.user or await get_user_by_id(db, w.user_id)
+        rows.append(
+            [
+                w.place,
+                w.id,
+                w.user_id,
+                getattr(user, 'telegram_id', None) if user else None,
+                getattr(user, 'username', None) if user else None,
+                w.ticket_code,
+                w.prize_type,
+                w.prize_value,
+                w.prize_text,
+                w.awarded,
+                w.awarded_at.isoformat() if w.awarded_at else '',
+                getattr(campaign, 'draw_seed', None),
+                getattr(campaign, 'draw_algorithm', None),
+                campaign.drawn_at.isoformat() if getattr(campaign, 'drawn_at', None) else '',
+            ]
+        )
+    return _csv_stream(rows, f'raffle_{campaign_id}_winners.csv')

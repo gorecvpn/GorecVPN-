@@ -110,6 +110,8 @@ async def show_promocodes_list(callback: types.CallbackQuery, db_user: User, db:
                 text += f'💸 Скидка: {promo.balance_bonus_kopeks}% ({discount_hours} ч.)\n'
             else:
                 text += f'💸 Скидка: {promo.balance_bonus_kopeks}% (до покупки)\n'
+        elif promo.type == PromoCodeType.RAFFLE_TICKETS.value:
+            text += f'🎟 Билетов: {promo.subscription_days}\n'
 
         # Промогруппа комбинируется с любым типом (назначается при активации
         # независимо от type) — показываем прикреплённую группу и у составных
@@ -201,6 +203,8 @@ async def show_promocode_management(callback: types.CallbackQuery, db_user: User
             text += f'💸 <b>Скидка:</b> {promo.balance_bonus_kopeks}% (срок: {discount_hours} ч.)\n'
         else:
             text += f'💸 <b>Скидка:</b> {promo.balance_bonus_kopeks}% (до первой покупки)\n'
+    elif promo.type == PromoCodeType.RAFFLE_TICKETS.value:
+        text += f'🎟 <b>Билетов:</b> {promo.subscription_days}\n'
 
     # Промогруппа комбинируется с любым типом (назначается при активации
     # независимо от type) — показываем прикреплённую группу и у составных
@@ -448,6 +452,7 @@ async def select_promocode_type(callback: types.CallbackQuery, db_user: User, st
         'group': '🏷️ Промогруппа',
         'discount': '💸 Одноразовая скидка',
         'combo': '💰📅 Баланс + дни подписки',
+        'raffle': '🎟 Билеты розыгрыша',
     }
 
     await state.update_data(promocode_type=promo_type)
@@ -501,6 +506,9 @@ async def process_promocode_code(message: types.Message, db_user: User, state: F
         await state.set_state(AdminStates.setting_promocode_value)
     elif promo_type == 'discount':
         await message.answer(f'💸 <b>Промокод:</b> <code>{code}</code>\n\nВведите процент скидки (1-100):')
+        await state.set_state(AdminStates.setting_promocode_value)
+    elif promo_type == 'raffle':
+        await message.answer(f'🎟 <b>Промокод:</b> <code>{code}</code>\n\nВведите число билетов розыгрыша (1-50):')
         await state.set_state(AdminStates.setting_promocode_value)
     elif promo_type == 'group':
         # Show promo group selection
@@ -590,6 +598,9 @@ async def process_promocode_value(message: types.Message, db_user: User, state: 
             return
         if promo_type == 'discount' and (value < 1 or value > 100):
             await message.answer('❌ Процент скидки должен быть от 1 до 100')
+            return
+        if promo_type == 'raffle' and (value < 1 or value > 50):
+            await message.answer('❌ Число билетов должно быть от 1 до 50')
             return
 
         await state.update_data(promocode_value=value)
@@ -806,6 +817,7 @@ async def process_promocode_expiry(message: types.Message, db_user: User, state:
             'trial': PromoCodeType.TRIAL_SUBSCRIPTION,
             'group': PromoCodeType.PROMO_GROUP,
             'combo': PromoCodeType.BALANCE_AND_DAYS,
+            'raffle': PromoCodeType.RAFFLE_TICKETS,
         }
 
         if promo_type == 'combo':
@@ -813,7 +825,7 @@ async def process_promocode_expiry(message: types.Message, db_user: User, state:
             subscription_days = data.get('promocode_combo_days', 0)
         else:
             balance_bonus_kopeks = value * 100 if promo_type == 'balance' else 0
-            subscription_days = value if promo_type in ['days', 'trial'] else 0
+            subscription_days = value if promo_type in ['days', 'trial', 'raffle'] else 0
 
         promocode = await create_promocode(
             db=db,
@@ -833,6 +845,7 @@ async def process_promocode_expiry(message: types.Message, db_user: User, state:
             'trial': 'Тестовая подписка',
             'group': 'Промогруппа',
             'combo': 'Баланс + дни подписки',
+            'raffle': 'Билеты розыгрыша',
         }
 
         summary_text = f"""
@@ -844,6 +857,8 @@ async def process_promocode_expiry(message: types.Message, db_user: User, state:
 
         if promo_type == 'balance':
             summary_text += f'💰 <b>Сумма:</b> {settings.format_price(promocode.balance_bonus_kopeks)}\n'
+        elif promo_type == 'raffle':
+            summary_text += f'🎟 <b>Билетов:</b> {promocode.subscription_days}\n'
         elif promo_type in ['days', 'trial']:
             summary_text += f'📅 <b>Дней:</b> {promocode.subscription_days}\n'
         elif promo_type == 'combo':

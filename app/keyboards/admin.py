@@ -1329,6 +1329,12 @@ def get_promocode_type_keyboard(language: str = 'ru') -> InlineKeyboardMarkup:
                     callback_data='promo_type_combo',
                 )
             ],
+            [
+                InlineKeyboardButton(
+                    text=_t(texts, 'ADMIN_PROMOCODE_TYPE_RAFFLE', '🎟 Билеты розыгрыша'),
+                    callback_data='promo_type_raffle',
+                )
+            ],
             [InlineKeyboardButton(text=texts.BACK, callback_data='admin_promocodes')],
         ]
     )

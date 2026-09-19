@@ -13,7 +13,9 @@ from sqlalchemy.orm import selectinload
 from app.database.models import (
     RaffleCampaign,
     RaffleCampaignStatus,
+    RaffleReminderLog,
     RaffleTicket,
+    RaffleTicketSource,
     RaffleWinner,
 )
 
@@ -140,6 +142,8 @@ async def create_ticket(
     source_transaction_id: int,
     tariff_id: int | None = None,
     ticket_index: int = 0,
+    source: str = RaffleTicketSource.PURCHASE,
+    source_ref: str | None = None,
     commit: bool = True,
 ) -> RaffleTicket:
     ticket = RaffleTicket(
@@ -149,6 +153,8 @@ async def create_ticket(
         source_transaction_id=source_transaction_id,
         ticket_index=int(ticket_index or 0),
         tariff_id=tariff_id,
+        source=source or RaffleTicketSource.PURCHASE,
+        source_ref=source_ref,
     )
     db.add(ticket)
     if commit:
@@ -308,3 +314,144 @@ async def delete_campaign(db: AsyncSession, campaign: RaffleCampaign) -> None:
     await db.delete(campaign)
     await db.commit()
     logger.info('Удалена кампания розыгрыша', campaign_id=campaign_id)
+
+
+async def count_tickets_for_user(db: AsyncSession, campaign_id: int, user_id: int) -> int:
+    result = await db.execute(
+        select(func.count(RaffleTicket.id)).where(
+            RaffleTicket.campaign_id == campaign_id,
+            RaffleTicket.user_id == user_id,
+        )
+    )
+    return int(result.scalar() or 0)
+
+
+async def count_tickets_for_user_by_source(db: AsyncSession, campaign_id: int, user_id: int, source: str) -> int:
+    result = await db.execute(
+        select(func.count(RaffleTicket.id)).where(
+            RaffleTicket.campaign_id == campaign_id,
+            RaffleTicket.user_id == user_id,
+            RaffleTicket.source == source,
+        )
+    )
+    return int(result.scalar() or 0)
+
+
+async def list_expired_active_campaigns(db: AsyncSession) -> list[RaffleCampaign]:
+    """ACTIVE campaigns whose ends_at is in the past (due for auto-draw)."""
+    now = datetime.now(UTC)
+    result = await db.execute(
+        select(RaffleCampaign).where(
+            and_(
+                RaffleCampaign.status == RaffleCampaignStatus.ACTIVE.value,
+                RaffleCampaign.ends_at.is_not(None),
+                RaffleCampaign.ends_at < now,
+            )
+        )
+    )
+    return list(result.scalars().all())
+
+
+async def list_campaigns_needing_reminder(
+    db: AsyncSession, *, hours_before: int, window_hours: float = 1.0
+) -> list[RaffleCampaign]:
+    """ACTIVE campaigns whose ends_at is within [now+hours_before-window, now+hours_before]."""
+    from datetime import timedelta
+
+    now = datetime.now(UTC)
+    target = now + timedelta(hours=hours_before)
+    window_start = target - timedelta(hours=window_hours)
+    result = await db.execute(
+        select(RaffleCampaign).where(
+            and_(
+                RaffleCampaign.status == RaffleCampaignStatus.ACTIVE.value,
+                RaffleCampaign.ends_at.is_not(None),
+                RaffleCampaign.ends_at >= window_start,
+                RaffleCampaign.ends_at <= target,
+            )
+        )
+    )
+    return list(result.scalars().all())
+
+
+async def list_distinct_ticket_user_ids(db: AsyncSession, campaign_id: int) -> list[int]:
+    result = await db.execute(select(RaffleTicket.user_id).where(RaffleTicket.campaign_id == campaign_id).distinct())
+    return [int(r) for r in result.scalars().all()]
+
+
+async def has_reminder_been_sent(
+    db: AsyncSession, campaign_id: int, user_id: int, reminder_type: str = 'ends_24h'
+) -> bool:
+    result = await db.execute(
+        select(RaffleReminderLog.id)
+        .where(
+            RaffleReminderLog.campaign_id == campaign_id,
+            RaffleReminderLog.user_id == user_id,
+            RaffleReminderLog.reminder_type == reminder_type,
+        )
+        .limit(1)
+    )
+    return result.scalar_one_or_none() is not None
+
+
+async def mark_reminder_sent(
+    db: AsyncSession,
+    campaign_id: int,
+    user_id: int,
+    reminder_type: str = 'ends_24h',
+    *,
+    commit: bool = True,
+) -> RaffleReminderLog:
+    log = RaffleReminderLog(
+        campaign_id=campaign_id,
+        user_id=user_id,
+        reminder_type=reminder_type,
+        sent_at=datetime.now(UTC),
+    )
+    db.add(log)
+    if commit:
+        await db.commit()
+    else:
+        await db.flush()
+    await db.refresh(log)
+    return log
+
+
+async def find_recent_source_tickets(
+    db: AsyncSession,
+    *,
+    campaign_id: int,
+    user_id: int,
+    source: str,
+    source_ref_prefix: str,
+    within_seconds: int = 120,
+) -> list[RaffleTicket]:
+    from datetime import timedelta
+
+    since = datetime.now(UTC) - timedelta(seconds=within_seconds)
+    result = await db.execute(
+        select(RaffleTicket).where(
+            RaffleTicket.campaign_id == campaign_id,
+            RaffleTicket.user_id == user_id,
+            RaffleTicket.source == source,
+            RaffleTicket.source_ref.is_not(None),
+            RaffleTicket.source_ref.startswith(source_ref_prefix),
+            RaffleTicket.created_at >= since,
+        )
+    )
+    return list(result.scalars().all())
+
+
+async def list_tickets_by_campaign_source_ref(
+    db: AsyncSession, campaign_id: int, source: str, source_ref: str
+) -> list[RaffleTicket]:
+    result = await db.execute(
+        select(RaffleTicket)
+        .where(
+            RaffleTicket.campaign_id == campaign_id,
+            RaffleTicket.source == source,
+            RaffleTicket.source_ref == source_ref,
+        )
+        .order_by(RaffleTicket.ticket_index.asc())
+    )
+    return list(result.scalars().all())

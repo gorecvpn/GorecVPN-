@@ -2302,6 +2302,12 @@
   "RAFFLE_HOW_PURCHASE": "За покупку подписки — <b>{n}</b> билет(ов).",
   "RAFFLE_HOW_TARIFF_NOTE": "Для отдельных тарифов число билетов может отличаться.",
   "RAFFLE_HOW_SKIP_TRIAL": "Триальные / бесплатные покупки билеты не дают.",
+  "RAFFLE_PROGRESS_HEADER": "📊 <b>Ваш прогресс</b>",
+  "RAFFLE_PROGRESS_TICKETS": "Билетов у вас: <b>{count}</b>",
+  "RAFFLE_PROGRESS_ENDED": "Кампания завершается — ожидайте итоги.",
+  "RAFFLE_PROGRESS_DAYS_LEFT": "До окончания: <b>{days}</b> дн.",
+  "RAFFLE_PROGRESS_HOURS_LEFT": "До окончания: <b>{hours}</b> ч.",
+  "RAFFLE_PROGRESS_ENDS_AT": "Дата окончания: {dt}",
   "RAFFLE_YOUR_TICKETS": "Ваши билеты: <b>{count}</b>",
   "RAFFLE_NO_TICKETS": "Пока нет — купите или продлите подписку.",
   "RAFFLE_TICKETS_TRUNCATED": "…и ещё {n}"

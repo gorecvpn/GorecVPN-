@@ -11,8 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database.crud import raffle as raffle_crud
-from app.database.models import RaffleCampaignStatus, RafflePrizeType, User
-from app.services.raffle.service import draw_winners
+from app.database.crud.user import get_user_by_telegram_id
+from app.database.models import RaffleCampaignStatus, RafflePrizeType, RaffleTicketSource, User
+from app.services.raffle.service import draw_winners, grant_tickets
 from app.states import AdminStates
 from app.utils.decorators import admin_required, error_handler
 
@@ -250,6 +251,14 @@ async def view_campaign(callback: types.CallbackQuery, db_user: User, db: AsyncS
         rows.append(
             [
                 types.InlineKeyboardButton(
+                    text='🎟 Выдать билеты',
+                    callback_data=f'admin_raffle_grant_{campaign.id}',
+                )
+            ]
+        )
+        rows.append(
+            [
+                types.InlineKeyboardButton(
                     text='🎲 Провести розыгрыш',
                     callback_data=f'admin_raffle_draw_{campaign.id}',
                 )
@@ -318,6 +327,87 @@ async def run_draw(callback: types.CallbackQuery, db_user: User, db: AsyncSessio
     await view_campaign(callback, db_user, db)
 
 
+@admin_required
+@error_handler
+async def start_grant_tickets(callback: types.CallbackQuery, db_user: User, state: FSMContext):
+    try:
+        campaign_id = int((callback.data or '').rsplit('_', 1)[-1])
+    except ValueError:
+        await callback.answer('Ошибка ID', show_alert=True)
+        return
+    await state.set_state(AdminStates.raffle_grant_telegram_id)
+    await state.update_data(raffle_grant_campaign_id=campaign_id)
+    await callback.message.edit_text(
+        f'Выдача билетов для кампании #{campaign_id}.\n\nВведите Telegram ID пользователя:',
+        reply_markup=_CANCEL,
+    )
+    await callback.answer()
+
+
+@admin_required
+@error_handler
+async def process_grant_telegram_id(message: types.Message, state: FSMContext, db_user: User):
+    raw = (message.text or '').strip()
+    try:
+        telegram_id = int(raw)
+    except ValueError:
+        await message.answer('Введите числовой Telegram ID', reply_markup=_CANCEL)
+        return
+    await state.update_data(raffle_grant_telegram_id=telegram_id)
+    await state.set_state(AdminStates.raffle_grant_count)
+    await message.answer('Сколько билетов выдать? (1–50)', reply_markup=_CANCEL)
+
+
+@admin_required
+@error_handler
+async def process_grant_count(message: types.Message, state: FSMContext, db: AsyncSession, db_user: User):
+    raw = (message.text or '').strip()
+    try:
+        count = int(raw)
+    except ValueError:
+        await message.answer('Введите целое число 1–50', reply_markup=_CANCEL)
+        return
+    if count < 1 or count > 50:
+        await message.answer('Диапазон 1–50', reply_markup=_CANCEL)
+        return
+    data = await state.get_data()
+    campaign_id = int(data['raffle_grant_campaign_id'])
+    telegram_id = int(data['raffle_grant_telegram_id'])
+    user = await get_user_by_telegram_id(db, telegram_id)
+    if user is None:
+        await message.answer('Пользователь не найден', reply_markup=_CANCEL)
+        return
+    try:
+        tickets = await grant_tickets(
+            db,
+            user.id,
+            count,
+            source=RaffleTicketSource.ADMIN,
+            source_ref=f'admin_tg:{db_user.id}:{telegram_id}',
+            campaign_id=campaign_id,
+            notify=True,
+        )
+    except ValueError as exc:
+        await message.answer(f'Ошибка: {html.escape(str(exc))}', reply_markup=_CANCEL)
+        return
+    await state.clear()
+    codes = ', '.join(f'<code>{html.escape(t.ticket_code)}</code>' for t in tickets[:10])
+    extra = f' …и ещё {len(tickets) - 10}' if len(tickets) > 10 else ''
+    await message.answer(
+        f'✅ Выдано билетов: <b>{len(tickets)}</b> пользователю <code>{telegram_id}</code>\n{codes}{extra}',
+        reply_markup=types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    types.InlineKeyboardButton(
+                        text='⬅️ К кампании',
+                        callback_data=f'admin_raffle_view_{campaign_id}',
+                    )
+                ]
+            ]
+        ),
+    )
+
+
 def register_handlers(dp: Dispatcher) -> None:
     dp.callback_query.register(show_raffles_menu, F.data == 'admin_raffles')
     dp.callback_query.register(start_create_campaign, F.data == 'admin_raffle_create')
@@ -335,6 +425,9 @@ def register_handlers(dp: Dispatcher) -> None:
     dp.callback_query.register(activate_campaign, F.data.startswith('admin_raffle_activate_'))
     dp.callback_query.register(close_campaign, F.data.startswith('admin_raffle_close_'))
     dp.callback_query.register(run_draw, F.data.startswith('admin_raffle_draw_'))
+    dp.callback_query.register(start_grant_tickets, F.data.startswith('admin_raffle_grant_'))
     dp.message.register(process_campaign_name, AdminStates.creating_raffle_campaign_name)
     dp.message.register(process_campaign_winners, AdminStates.creating_raffle_campaign_winners)
     dp.message.register(process_prize_value, AdminStates.creating_raffle_campaign_prize_value)
+    dp.message.register(process_grant_telegram_id, AdminStates.raffle_grant_telegram_id)
+    dp.message.register(process_grant_count, AdminStates.raffle_grant_count)

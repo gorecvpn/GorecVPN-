@@ -480,6 +480,18 @@ class Settings(BaseSettings):
     CONTESTS_ENABLED: bool = False
     RAFFLE_ENABLED: bool = False  # Розыгрыш билетов за покупку подписки
     RAFFLE_BUTTON_VISIBLE: bool = False  # Показ кнопки «Розыгрыш» в главном меню
+    # Авто-жеребьёвка по ends_at (статус ACTIVE → drawn). Ручной draw сохраняется.
+    RAFFLE_AUTO_DRAW_ENABLED: bool = False
+    RAFFLE_AUTO_DRAW_INTERVAL_SECONDS: int = 60
+    # Антифрод: 0 = без лимита
+    RAFFLE_MAX_TICKETS_PER_USER: int = 0
+    RAFFLE_MAX_TICKETS_PER_PAYMENT: int = 0
+    # Билеты рефереру при успешном пополнении реферала (не при регистрации). 0 = выкл.
+    RAFFLE_REFERRAL_TOPUP_TICKETS: int = 1
+    RAFFLE_REFERRAL_TOPUP_MAX_PER_CAMPAIGN: int = 50
+    # Напоминание участникам ~N часов до ends_at (дедуп по campaign+user)
+    RAFFLE_REMINDER_ENABLED: bool = True
+    RAFFLE_REMINDER_HOURS_BEFORE: int = 24
     CONTESTS_BUTTON_VISIBLE: bool = False
     # Для обратной совместимости со старыми конфигами
     REFERRAL_CONTESTS_ENABLED: bool = False
@@ -3523,6 +3535,27 @@ class Settings(BaseSettings):
 
     def is_raffle_button_visible(self) -> bool:
         return self.is_raffle_enabled() and bool(getattr(self, 'RAFFLE_BUTTON_VISIBLE', False))
+
+    def is_raffle_auto_draw_enabled(self) -> bool:
+        return self.is_raffle_enabled() and bool(getattr(self, 'RAFFLE_AUTO_DRAW_ENABLED', False))
+
+    def get_raffle_max_tickets_per_user(self) -> int:
+        return max(0, int(getattr(self, 'RAFFLE_MAX_TICKETS_PER_USER', 0) or 0))
+
+    def get_raffle_max_tickets_per_payment(self) -> int:
+        return max(0, int(getattr(self, 'RAFFLE_MAX_TICKETS_PER_PAYMENT', 0) or 0))
+
+    def get_raffle_referral_topup_tickets(self) -> int:
+        return max(0, int(getattr(self, 'RAFFLE_REFERRAL_TOPUP_TICKETS', 0) or 0))
+
+    def get_raffle_referral_topup_max_per_campaign(self) -> int:
+        return max(0, int(getattr(self, 'RAFFLE_REFERRAL_TOPUP_MAX_PER_CAMPAIGN', 50) or 0))
+
+    def is_raffle_reminder_enabled(self) -> bool:
+        return self.is_raffle_enabled() and bool(getattr(self, 'RAFFLE_REMINDER_ENABLED', True))
+
+    def get_raffle_reminder_hours_before(self) -> int:
+        return max(1, int(getattr(self, 'RAFFLE_REMINDER_HOURS_BEFORE', 24) or 24))
 
     def is_contests_enabled(self) -> bool:
         if getattr(self, 'CONTESTS_ENABLED', False):

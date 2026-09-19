@@ -23,6 +23,7 @@ from app.database.models import (
     RaffleCampaignStatus,
     RafflePrizeType,
     RaffleTicket,
+    RaffleTicketSource,
     RaffleWinner,
     Transaction,
 )
@@ -147,52 +148,72 @@ def _looks_like_trial_purchase(tx: Transaction | None) -> bool:
     return 'trial' in haystack or 'триал' in haystack
 
 
-async def issue_for_purchase(
+_REFUND_MARKERS = (
+    'refund',
+    'chargeback',
+    'charge_back',
+    'возврат',
+    'чарджбек',
+    'чарджбэк',
+    'рефанд',
+)
+
+
+def _looks_like_refund_or_chargeback(tx: Transaction | None) -> bool:
+    if tx is None:
+        return False
+    desc = (getattr(tx, 'description', None) or '').lower()
+    external = (getattr(tx, 'external_id', None) or '').lower()
+    method = (getattr(tx, 'payment_method', None) or '').lower()
+    tx_type = str(getattr(tx, 'type', None) or getattr(tx, 'transaction_type', None) or '').lower()
+    haystack = f'{desc} {external} {method} {tx_type}'
+    return any(marker in haystack for marker in _REFUND_MARKERS)
+
+
+def _should_skip_transaction(tx: Transaction | None, *, skip_trial: bool) -> bool:
+    """Antifraud / eligibility gate. Paid logic uses abs(amount_kopeks)."""
+    if tx is None:
+        return False
+    if abs(int(getattr(tx, 'amount_kopeks', 0) or 0)) == 0:
+        return True
+    if _looks_like_refund_or_chargeback(tx):
+        return True
+    if skip_trial and _looks_like_trial_purchase(tx):
+        return True
+    return False
+
+
+def _synthetic_source_transaction_id(namespace: str, ref: str) -> int:
+    """Stable negative id for non-purchase ticket batches (unique constraint)."""
+    digest = hashlib.sha256(f'{namespace}:{ref}'.encode()).hexdigest()
+    return -1 - (int(digest[:8], 16) % 1_999_999_999)
+
+
+def _apply_ticket_caps(desired: int, *, user_have: int, per_user_cap: int, per_payment_cap: int) -> int:
+    count = max(0, int(desired or 0))
+    if per_payment_cap > 0:
+        count = min(count, per_payment_cap)
+    if per_user_cap > 0:
+        remaining = max(0, per_user_cap - max(0, user_have))
+        count = min(count, remaining)
+    return count
+
+
+async def _issue_ticket_batch(
     db: AsyncSession,
+    *,
+    campaign: RaffleCampaign,
     user_id: int,
-    transaction_id: int,
+    count: int,
+    source_transaction_id: int,
+    source: str,
+    source_ref: str | None = None,
     tariff_id: int | None = None,
 ) -> list[RaffleTicket]:
-    """Выдать N билетов за оплаченную подписку.
-
-    N = tickets_by_tariff[tariff_id] если задано, иначе tickets_per_purchase.
-    Идемпотентно по (campaign_id, source_transaction_id) — retries return existing rows.
-    Пустой список — если RAFFLE_ENABLED=false / нет кампании / trial skip.
-    """
-    if not settings.is_raffle_enabled():
+    """Create up to ``count`` tickets for one source batch; notify once."""
+    if count < 1:
         return []
-    if not user_id or not transaction_id:
-        return []
-
-    campaign = await raffle_crud.get_current_active_campaign(db)
-    if campaign is None:
-        return []
-
-    existing = await raffle_crud.list_tickets_by_campaign_tx(db, campaign.id, transaction_id)
-    if existing:
-        return existing
-
-    if getattr(campaign, 'skip_trial_purchases', True):
-        tx = await db.get(Transaction, transaction_id)
-        if _looks_like_trial_purchase(tx):
-            logger.info(
-                'Пропуск билета розыгрыша для trial/бесплатной покупки',
-                transaction_id=transaction_id,
-                campaign_id=campaign.id,
-            )
-            return []
-
-    resolved_tariff_id = tariff_id
-    if resolved_tariff_id is None:
-        try:
-            subscription = await get_subscription_by_user_id(db, user_id)
-            resolved_tariff_id = getattr(subscription, 'tariff_id', None) if subscription else None
-        except Exception:
-            resolved_tariff_id = None
-
-    count = tickets_count_for_purchase(campaign, resolved_tariff_id)
     issued: list[RaffleTicket] = []
-
     for index in range(count):
         ticket = None
         for _ in range(5):
@@ -204,14 +225,16 @@ async def issue_for_purchase(
                         campaign_id=campaign.id,
                         user_id=user_id,
                         ticket_code=code,
-                        source_transaction_id=transaction_id,
-                        tariff_id=resolved_tariff_id,
+                        source_transaction_id=source_transaction_id,
+                        tariff_id=tariff_id,
                         ticket_index=index,
+                        source=source,
+                        source_ref=source_ref,
                         commit=False,
                     )
                 break
             except IntegrityError:
-                already = await raffle_crud.list_tickets_by_campaign_tx(db, campaign.id, transaction_id)
+                already = await raffle_crud.list_tickets_by_campaign_tx(db, campaign.id, source_transaction_id)
                 if already:
                     return already
                 logger.debug('Коллизия кода билета, повтор', campaign_id=campaign.id)
@@ -219,7 +242,7 @@ async def issue_for_purchase(
             logger.warning(
                 'Не удалось выдать билет розыгрыша',
                 user_id=user_id,
-                transaction_id=transaction_id,
+                source=source,
                 ticket_index=index,
             )
             break
@@ -237,10 +260,280 @@ async def issue_for_purchase(
         count=len(issued),
         user_id=user_id,
         campaign_id=campaign.id,
-        transaction_id=transaction_id,
+        source=source,
+        source_transaction_id=source_transaction_id,
     )
     await _notify_user_ticket(db, user_id, issued[0], campaign, tickets_count=len(issued))
     return issued
+
+
+async def issue_for_purchase(
+    db: AsyncSession,
+    user_id: int,
+    transaction_id: int,
+    tariff_id: int | None = None,
+) -> list[RaffleTicket]:
+    """Выдать N билетов за оплаченную подписку.
+
+    N = tickets_by_tariff[tariff_id] если задано, иначе tickets_per_purchase.
+    Идемпотентно по (campaign_id, source_transaction_id) — retries return existing rows.
+    Пустой список — если RAFFLE_ENABLED=false / нет кампании / trial/refund skip / caps.
+    """
+    if not settings.is_raffle_enabled():
+        return []
+    if not user_id or not transaction_id:
+        return []
+
+    campaign = await raffle_crud.get_current_active_campaign(db)
+    if campaign is None:
+        return []
+
+    existing = await raffle_crud.list_tickets_by_campaign_tx(db, campaign.id, transaction_id)
+    if existing:
+        return existing
+
+    tx = await db.get(Transaction, transaction_id)
+    if _should_skip_transaction(tx, skip_trial=bool(getattr(campaign, 'skip_trial_purchases', True))):
+        logger.info(
+            'Пропуск билета розыгрыша (trial/refund/zero)',
+            transaction_id=transaction_id,
+            campaign_id=campaign.id,
+        )
+        return []
+
+    resolved_tariff_id = tariff_id
+    if resolved_tariff_id is None:
+        try:
+            subscription = await get_subscription_by_user_id(db, user_id)
+            resolved_tariff_id = getattr(subscription, 'tariff_id', None) if subscription else None
+        except Exception:
+            resolved_tariff_id = None
+
+    desired = tickets_count_for_purchase(campaign, resolved_tariff_id)
+    user_have = await raffle_crud.count_tickets_for_user(db, campaign.id, user_id)
+    count = _apply_ticket_caps(
+        desired,
+        user_have=user_have,
+        per_user_cap=settings.get_raffle_max_tickets_per_user(),
+        per_payment_cap=settings.get_raffle_max_tickets_per_payment(),
+    )
+    if count < 1:
+        logger.info(
+            'Лимит билетов розыгрыша исчерпан',
+            user_id=user_id,
+            campaign_id=campaign.id,
+            user_have=user_have,
+        )
+        return []
+
+    return await _issue_ticket_batch(
+        db,
+        campaign=campaign,
+        user_id=user_id,
+        count=count,
+        source_transaction_id=transaction_id,
+        source=RaffleTicketSource.PURCHASE,
+        source_ref=str(transaction_id),
+        tariff_id=resolved_tariff_id,
+    )
+
+
+async def grant_tickets(
+    db: AsyncSession,
+    user_id: int,
+    count: int,
+    *,
+    source: str = RaffleTicketSource.ADMIN,
+    source_ref: str | None = None,
+    campaign_id: int | None = None,
+    notify: bool = True,
+) -> list[RaffleTicket]:
+    """Админ / промо: выдать N билетов на активную (или указанную) кампанию."""
+    if not settings.is_raffle_enabled():
+        return []
+    if not user_id or count < 1:
+        return []
+
+    if campaign_id is not None:
+        campaign = await raffle_crud.get_campaign_by_id(db, campaign_id)
+        if campaign is None or campaign.status != RaffleCampaignStatus.ACTIVE.value:
+            raise ValueError('Campaign is not active')
+    else:
+        campaign = await raffle_crud.get_current_active_campaign(db)
+        if campaign is None:
+            raise ValueError('No active campaign')
+
+    ref = (source_ref or f'{source}:{user_id}:{secrets.token_hex(4)}')[:128]
+    if source_ref:
+        existing = await raffle_crud.list_tickets_by_campaign_source_ref(db, campaign.id, source, ref)
+        if existing:
+            return existing
+
+    user_have = await raffle_crud.count_tickets_for_user(db, campaign.id, user_id)
+    capped = _apply_ticket_caps(
+        min(50, int(count)),
+        user_have=user_have,
+        per_user_cap=settings.get_raffle_max_tickets_per_user(),
+        per_payment_cap=0,
+    )
+    if capped < 1:
+        return []
+
+    synthetic_id = _synthetic_source_transaction_id(source, f'{campaign.id}:{ref}')
+    issued = await _issue_ticket_batch(
+        db,
+        campaign=campaign,
+        user_id=user_id,
+        count=capped,
+        source_transaction_id=synthetic_id,
+        source=source,
+        source_ref=ref,
+    )
+    if not notify:
+        return issued
+    return issued
+
+
+async def issue_for_referral_topup(
+    db: AsyncSession,
+    referrer_id: int,
+    referee_id: int,
+    topup_amount_kopeks: int,
+) -> list[RaffleTicket]:
+    """Award ticket(s) to referrer when referred user successfully tops up."""
+    if not settings.is_raffle_enabled():
+        return []
+    tickets_n = settings.get_raffle_referral_topup_tickets()
+    if tickets_n < 1 or topup_amount_kopeks <= 0 or not referrer_id or not referee_id:
+        return []
+
+    campaign = await raffle_crud.get_current_active_campaign(db)
+    if campaign is None:
+        return []
+
+    prefix = f'referral:{referee_id}:'
+    recent = await raffle_crud.find_recent_source_tickets(
+        db,
+        campaign_id=campaign.id,
+        user_id=referrer_id,
+        source=RaffleTicketSource.REFERRAL,
+        source_ref_prefix=prefix,
+        within_seconds=120,
+    )
+    if recent:
+        return recent
+
+    already_referral = await raffle_crud.count_tickets_for_user_by_source(
+        db, campaign.id, referrer_id, RaffleTicketSource.REFERRAL
+    )
+    max_ref = settings.get_raffle_referral_topup_max_per_campaign()
+    if max_ref > 0 and already_referral >= max_ref:
+        logger.info(
+            'Реферальный лимит билетов розыгрыша исчерпан',
+            referrer_id=referrer_id,
+            campaign_id=campaign.id,
+            already=already_referral,
+        )
+        return []
+
+    desired = tickets_n
+    if max_ref > 0:
+        desired = min(desired, max(0, max_ref - already_referral))
+
+    user_have = await raffle_crud.count_tickets_for_user(db, campaign.id, referrer_id)
+    count = _apply_ticket_caps(
+        desired,
+        user_have=user_have,
+        per_user_cap=settings.get_raffle_max_tickets_per_user(),
+        per_payment_cap=settings.get_raffle_max_tickets_per_payment(),
+    )
+    if count < 1:
+        return []
+
+    ref = f'{prefix}{topup_amount_kopeks}:{secrets.token_hex(3)}'[:128]
+    return await grant_tickets(
+        db,
+        referrer_id,
+        count,
+        source=RaffleTicketSource.REFERRAL,
+        source_ref=ref,
+        campaign_id=campaign.id,
+        notify=True,
+    )
+
+
+async def auto_draw_due_campaigns(db: AsyncSession) -> list[int]:
+    """Draw ACTIVE campaigns whose ends_at has passed. Returns drawn campaign ids."""
+    if not settings.is_raffle_auto_draw_enabled():
+        return []
+    due = await raffle_crud.list_expired_active_campaigns(db)
+    drawn_ids: list[int] = []
+    for campaign in due:
+        try:
+            await draw_winners(db, campaign.id)
+            drawn_ids.append(campaign.id)
+            logger.info('Авто-жеребьёвка розыгрыша', campaign_id=campaign.id)
+        except Exception as exc:
+            logger.warning('Авто-жеребьёвка не удалась', campaign_id=campaign.id, error=exc)
+    return drawn_ids
+
+
+async def send_ending_reminders(db: AsyncSession) -> int:
+    """Notify users with tickets ~N hours before ends_at (deduped)."""
+    if not settings.is_raffle_reminder_enabled():
+        return 0
+    hours = settings.get_raffle_reminder_hours_before()
+    reminder_type = f'ends_{hours}h'
+    campaigns = await raffle_crud.list_campaigns_needing_reminder(db, hours_before=hours)
+    sent = 0
+    for campaign in campaigns:
+        user_ids = await raffle_crud.list_distinct_ticket_user_ids(db, campaign.id)
+        for user_id in user_ids:
+            try:
+                if await raffle_crud.has_reminder_been_sent(db, campaign.id, user_id, reminder_type):
+                    continue
+                user = await get_user_by_id(db, user_id)
+                if not user or not getattr(user, 'telegram_id', None):
+                    await raffle_crud.mark_reminder_sent(db, campaign.id, user_id, reminder_type)
+                    continue
+                ends = campaign.ends_at
+                ends_label = ends.strftime('%d.%m.%Y %H:%M UTC') if ends else ''
+                tickets = await raffle_crud.list_tickets_for_user(db, user_id, campaign_id=campaign.id)
+                text = (
+                    f'⏰ Напоминание о розыгрыше <b>{html.escape(campaign.name)}</b>\n\n'
+                    f'До окончания ~{hours} ч. ({html.escape(ends_label)}).\n'
+                    f'У вас билетов: <b>{len(tickets)}</b>.'
+                )
+                from app.bot_factory import create_bot
+                from app.services.notification_delivery_service import notification_delivery_service
+                from app.services.notification_types import NotificationType
+
+                bot = create_bot()
+                try:
+                    notif_type = getattr(NotificationType, 'RAFFLE_REMINDER', NotificationType.RAFFLE_TICKET)
+                    await notification_delivery_service.send_notification(
+                        user=user,
+                        notification_type=notif_type,
+                        context={
+                            'campaign_name': campaign.name,
+                            'hours_before': hours,
+                            'tickets_count': len(tickets),
+                        },
+                        bot=bot,
+                        telegram_message=text,
+                    )
+                finally:
+                    await bot.session.close()
+                await raffle_crud.mark_reminder_sent(db, campaign.id, user_id, reminder_type)
+                sent += 1
+            except Exception as exc:
+                logger.debug(
+                    'Не удалось отправить напоминание о розыгрыше',
+                    campaign_id=campaign.id,
+                    user_id=user_id,
+                    error=exc,
+                )
+    return sent
 
 
 async def _notify_user_ticket(
@@ -579,11 +872,23 @@ class RaffleService:
     async def issue_for_purchase(self, db, user_id, transaction_id, tariff_id=None):
         return await issue_for_purchase(db, user_id, transaction_id, tariff_id=tariff_id)
 
+    async def grant_tickets(self, db, user_id, count, **kwargs):
+        return await grant_tickets(db, user_id, count, **kwargs)
+
+    async def issue_for_referral_topup(self, db, referrer_id, referee_id, topup_amount_kopeks):
+        return await issue_for_referral_topup(db, referrer_id, referee_id, topup_amount_kopeks)
+
     async def draw_winners(self, db, campaign_id):
         return await draw_winners(db, campaign_id)
 
     async def retry_award_winner(self, db, winner_id):
         return await retry_award_winner(db, winner_id)
+
+    async def auto_draw_due_campaigns(self, db):
+        return await auto_draw_due_campaigns(db)
+
+    async def send_ending_reminders(self, db):
+        return await send_ending_reminders(db)
 
 
 raffle_service = RaffleService()

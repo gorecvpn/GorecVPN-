@@ -146,6 +146,8 @@ class PromoCodeType(Enum):
     PROMO_GROUP = 'promo_group'
     DISCOUNT = 'discount'  # Одноразовая процентная скидка (balance_bonus_kopeks = процент, subscription_days = часы)
     BALANCE_AND_DAYS = 'balance_and_days'  # Комбинированный: и бонус на баланс, и дни подписки одним кодом
+    # Билеты активного розыгрыша: subscription_days = число билетов (1–50)
+    RAFFLE_TICKETS = 'raffle_tickets'
 
 
 class PaymentMethod(Enum):
@@ -5276,8 +5278,17 @@ class RaffleCampaign(Base):
         return f'<RaffleCampaign id={self.id} name={self.name!r} status={self.status}>'
 
 
+class RaffleTicketSource:
+    """Источник билета розыгрыша (строковые константы, без отдельной таблицы)."""
+
+    PURCHASE = 'purchase'
+    ADMIN = 'admin'
+    PROMO = 'promo'
+    REFERRAL = 'referral'
+
+
 class RaffleTicket(Base):
-    """Билет розыгрыша, выданный за оплаченную транзакцию подписки (возможен индекс 0..N-1)."""
+    """Билет розыгрыша (покупка / админ / промо / реферал)."""
 
     __tablename__ = 'raffle_tickets'
     __table_args__ = (
@@ -5288,15 +5299,19 @@ class RaffleTicket(Base):
             name='uq_raffle_tickets_campaign_tx_idx',
         ),
         Index('ix_raffle_tickets_campaign_user', 'campaign_id', 'user_id'),
+        Index('ix_raffle_tickets_campaign_source', 'campaign_id', 'source'),
     )
 
     id = Column(Integer, primary_key=True, index=True)
     campaign_id = Column(Integer, ForeignKey('raffle_campaigns.id', ondelete='CASCADE'), nullable=False, index=True)
     user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
     ticket_code = Column(String(64), nullable=False, unique=True, index=True)
+    # Для purchase — id транзакции; для прочих — синтетический отрицательный id партии
     source_transaction_id = Column(Integer, nullable=False)
     ticket_index = Column(Integer, nullable=False, default=0)
     tariff_id = Column(Integer, ForeignKey('tariffs.id', ondelete='SET NULL'), nullable=True)
+    source = Column(String(32), nullable=False, default=RaffleTicketSource.PURCHASE)
+    source_ref = Column(String(128), nullable=True)
     created_at = Column(AwareDateTime(), default=func.now())
 
     campaign = relationship('RaffleCampaign', back_populates='tickets')
@@ -5304,6 +5319,27 @@ class RaffleTicket(Base):
 
     def __repr__(self) -> str:
         return f'<RaffleTicket id={self.id} code={self.ticket_code!r} user_id={self.user_id}>'
+
+
+class RaffleReminderLog(Base):
+    """Дедуп напоминаний участникам розыгрыша (например, за 24ч до ends_at)."""
+
+    __tablename__ = 'raffle_reminder_logs'
+    __table_args__ = (
+        UniqueConstraint(
+            'campaign_id',
+            'user_id',
+            'reminder_type',
+            name='uq_raffle_reminder_campaign_user_type',
+        ),
+        Index('ix_raffle_reminder_logs_campaign', 'campaign_id'),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    campaign_id = Column(Integer, ForeignKey('raffle_campaigns.id', ondelete='CASCADE'), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)
+    reminder_type = Column(String(32), nullable=False, default='ends_24h')
+    sent_at = Column(AwareDateTime(), default=func.now())
 
 
 class RaffleWinner(Base):

@@ -2302,6 +2302,12 @@
   "RAFFLE_HOW_PURCHASE": "For a subscription purchase — <b>{n}</b> ticket(s).",
   "RAFFLE_HOW_TARIFF_NOTE": "Some tariffs may grant a different number of tickets.",
   "RAFFLE_HOW_SKIP_TRIAL": "Trial / free purchases do not grant tickets.",
+  "RAFFLE_PROGRESS_HEADER": "📊 <b>Your progress</b>",
+  "RAFFLE_PROGRESS_TICKETS": "Your tickets: <b>{count}</b>",
+  "RAFFLE_PROGRESS_ENDED": "The campaign is ending — results coming soon.",
+  "RAFFLE_PROGRESS_DAYS_LEFT": "Time left: <b>{days}</b> day(s).",
+  "RAFFLE_PROGRESS_HOURS_LEFT": "Time left: <b>{hours}</b> h.",
+  "RAFFLE_PROGRESS_ENDS_AT": "Ends at: {dt}",
   "RAFFLE_YOUR_TICKETS": "Your tickets: <b>{count}</b>",
   "RAFFLE_NO_TICKETS": "None yet — buy or renew a subscription.",
   "RAFFLE_TICKETS_TRUNCATED": "…and {n} more"

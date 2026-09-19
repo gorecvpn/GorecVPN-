@@ -163,6 +163,8 @@ class PromoCodeService:
                     'trial_subscription_exists',
                     'trial_provisioning_failed',
                     'traffic_not_applicable',
+                    'raffle_tickets_count_invalid',
+                    'raffle_tickets_unavailable',
                 ):
                     return {'success': False, 'error': error_key}
                 raise
@@ -493,6 +495,32 @@ class PromoCodeService:
 
             balance_bonus_rubles = promocode.balance_bonus_kopeks / 100
             effects.append(f'💰 Баланс пополнен на {balance_bonus_rubles}₽')
+
+        if promocode.type == PromoCodeType.RAFFLE_TICKETS.value:
+            # subscription_days stores ticket count (1–50) for this promo type
+            ticket_count = max(1, min(50, int(promocode.subscription_days or 0)))
+            if ticket_count < 1:
+                raise ValueError('raffle_tickets_count_invalid')
+            from app.database.models import RaffleTicketSource
+            from app.services.raffle.service import grant_tickets
+
+            tickets = await grant_tickets(
+                db,
+                user.id,
+                ticket_count,
+                source=RaffleTicketSource.PROMO,
+                source_ref=f'promo:{promocode.id}:{user.id}',
+                notify=True,
+            )
+            if not tickets:
+                raise ValueError('raffle_tickets_unavailable')
+            effects.append(f'🎟 Выдано билетов розыгрыша: {len(tickets)}')
+            logger.info(
+                '✅ Пользователю выданы билеты розыгрыша по промокоду',
+                _format_user_log=self._format_user_log(user),
+                tickets=len(tickets),
+                code=promocode.code,
+            )
 
         if promocode.type == PromoCodeType.TRIAL_SUBSCRIPTION.value:
             from app.database.crud.subscription import create_trial_subscription
